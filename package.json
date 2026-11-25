@@ -1,0 +1,16 @@
+{
+  "name": "orca-plugin-pm-spec",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "需求中心 (lkl.pm-spec) — 结构化产品需求规格校验、AI 现状感知预检、评审快照与网页评审回流插件",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lkl-hubo/orca-plugin-pm-spec.git"
+  },
+  "scripts": {
+    "test": "orca plugin test .",
+    "bench": "node scripts/pm-spec-bench.mjs --lines 2000 --runs 200 --json"
+  }
+}

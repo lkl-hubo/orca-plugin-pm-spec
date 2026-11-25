@@ -1,0 +1,4 @@
+node_modules/
+.orca/
+dist/
+.DS_Store

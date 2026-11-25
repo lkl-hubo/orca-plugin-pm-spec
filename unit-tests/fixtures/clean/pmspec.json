@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "product": "收单商户平台",
+  "specsDir": "specs",
+  "codeRepos": [
+    {
+      "key": "merchant-api",
+      "path": "../merchant-api",
+      "description": "商户服务：退款申请、退款单查询"
+    }
+  ],
+  "roles": ["商户管理员", "商户操作员", "运营", "系统"],
+  "review": { "requiredSignoffRoles": ["研发", "测试"] },
+  "lint": { "disabled": [], "severityOverrides": {} }
+}

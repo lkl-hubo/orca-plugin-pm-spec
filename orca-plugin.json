@@ -1,0 +1,195 @@
+{
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "publisher": "lkl",
+  "id": "pm-spec",
+  "name": "需求中心",
+  "version": "1.0.0",
+  "description": "结构化产品需求规格：校验、AI 现状感知预检、评审快照与网页评审回流。",
+  "license": "MIT",
+  "homepage": "https://github.com/lkl-hubo/orca-plugin-pm-spec",
+  "repository": "https://github.com/lkl-hubo/orca-plugin-pm-spec",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "pluginApi": 1,
+  "main": "worker/main.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "hub",
+        "title": "需求中心",
+        "icon": "file-text",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "commands": [
+      {
+        "id": "pmspec.openHub",
+        "title": "需求中心：打开面板",
+        "when": "global"
+      },
+      {
+        "id": "pmspec.newSpec",
+        "title": "需求中心：新建需求",
+        "when": "workspace"
+      },
+      {
+        "id": "pmspec.lintCurrent",
+        "title": "需求中心：校验当前需求",
+        "when": "workspace"
+      },
+      {
+        "id": "pmspec.reviewCurrent",
+        "title": "需求中心：发起 AI 预检",
+        "when": "workspace"
+      },
+      {
+        "id": "pmspec.snapshotCurrent",
+        "title": "需求中心：保存评审快照",
+        "when": "workspace"
+      },
+      {
+        "id": "pmspec.publishCurrent",
+        "title": "需求中心：发布评审链接",
+        "when": "workspace"
+      },
+      {
+        "id": "pmspec.syncReviews",
+        "title": "需求中心：同步评审意见",
+        "when": "workspace"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "pmspec-status",
+        "text": "需求中心",
+        "icon": "file-text",
+        "tone": "neutral",
+        "tooltip": "打开需求中心",
+        "command": "pmspec.openHub"
+      }
+    ],
+    "events": [
+      {
+        "on": "agent.status.changed"
+      },
+      {
+        "on": "workspace.changed"
+      }
+    ],
+    "hooks": [
+      {
+        "event": "agent.launch.before",
+        "onError": "pass"
+      },
+      {
+        "event": "agent.tool.before",
+        "onError": "pass"
+      }
+    ],
+    "settings": [
+      {
+        "key": "gatewayUrl",
+        "title": "分享网关地址",
+        "description": "默认自动共享宿主「分享网关」配置；留空即复用宿主配置，仅需为需求中心单独覆盖时填写。",
+        "type": "string",
+        "default": "",
+        "maxLength": 512,
+        "placeholder": "https://share.example.com"
+      },
+      {
+        "key": "reviewAgent",
+        "title": "AI 预检使用的智能体",
+        "description": "需已在 LKL-PMStudio 中启用并完成登录。Pi 与 Claude Code 支持写操作强制拦截，其余智能体只做改动检测。",
+        "type": "string",
+        "default": "pi",
+        "enum": [
+          "pi",
+          "opencode",
+          "codebuddy",
+          "qwen-code",
+          "kimi",
+          "mimo-code",
+          "claude"
+        ],
+        "enumLabels": [
+          "Pi",
+          "OpenCode",
+          "CodeBuddy",
+          "Qwen Code",
+          "Kimi",
+          "MiMo Code",
+          "Claude Code"
+        ]
+      },
+      {
+        "key": "reviewTimeoutMinutes",
+        "title": "AI 预检超时（分钟）",
+        "type": "integer",
+        "default": 15,
+        "minimum": 5,
+        "maximum": 60
+      },
+      {
+        "key": "maxConcurrentReviews",
+        "title": "同时运行的 AI 预检上限",
+        "type": "integer",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 3
+      },
+      {
+        "key": "reviewExpiryDays",
+        "title": "评审链接有效期（天）",
+        "type": "integer",
+        "default": 14,
+        "minimum": 1,
+        "maximum": 90
+      },
+      {
+        "key": "commentSyncSeconds",
+        "title": "评审意见同步间隔（秒）",
+        "description": "仅在面板打开时同步。",
+        "type": "integer",
+        "default": 60,
+        "minimum": 30,
+        "maximum": 600
+      },
+      {
+        "key": "collectLocalMetrics",
+        "title": "记录本地试点指标",
+        "description": "只写入规格工作区 .pmspec/metrics.jsonl，不上传。",
+        "type": "boolean",
+        "default": true
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "workspace:write"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "agent:launch"
+    },
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "secrets:own"
+    }
+  ]
+}
