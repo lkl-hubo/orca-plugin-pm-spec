@@ -13,17 +13,21 @@ function parsePositiveInt(raw, flagName) {
   return num
 }
 
-export function parseCliArgs(argv) {
+export function parseCliArgs(argv, env = process.env) {
   const parsed = {
-    baseUrl: 'http://127.0.0.1:8787',
+    baseUrl:
+      env.ORCA_ARTIFACTS_API_URL?.trim() ||
+      env.PMSPEC_GATEWAY_URL?.trim() ||
+      'http://127.0.0.1:8787',
     concurrency: 20,
     durationSeconds: 60,
     budgetMs: 200,
     rotateEvery: 1800,
     token:
-      process.env.PMSPEC_BEARER_TOKEN ??
-      process.env.GATEWAY_BEARER_TOKEN ??
-      process.env.AUTH_TOKEN ??
+      env.ORCA_CLOUD_AUTH_TOKEN?.trim() ||
+      env.PMSPEC_BEARER_TOKEN?.trim() ||
+      env.GATEWAY_BEARER_TOKEN?.trim() ||
+      env.AUTH_TOKEN?.trim() ||
       null,
     json: false,
     help: false

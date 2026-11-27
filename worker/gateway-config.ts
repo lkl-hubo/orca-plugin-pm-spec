@@ -1,8 +1,14 @@
+import process from 'node:process'
+
 export const GATEWAY_TOKEN_SECRET_KEY = 'gateway:token'
 export const HOST_SHARE_GATEWAY_SECRET_KEY = '__pmstudio_host__:share-gateway-auth'
 
+export const ENV_GATEWAY_URL_KEYS = ['ORCA_ARTIFACTS_API_URL', 'PMSPEC_GATEWAY_URL'] as const
+export const ENV_GATEWAY_TOKEN_KEYS = ['ORCA_CLOUD_AUTH_TOKEN', 'PMSPEC_BEARER_TOKEN'] as const
+export const ENV_GATEWAY_AUTH_MODE_KEY = 'ORCA_SHARE_GATEWAY_AUTH_MODE'
+
 export type GatewayAuthMode = 'static' | 'none'
-export type GatewayConfigSource = 'host' | 'plugin' | 'none'
+export type GatewayConfigSource = 'env' | 'host' | 'plugin' | 'none'
 
 export type GatewayCreateReviewResponse = {
   version: number
@@ -84,6 +90,10 @@ export type EffectiveGatewayConfig = {
   configured: boolean
   tokenStored: boolean
   hasPluginOverride: boolean
+  envGatewayUrl: string
+  envTokenStored: boolean
+  envUrlVar: string | null
+  envTokenVar: string | null
   pluginGatewayUrl: string
   pluginTokenStored: boolean
   hostGatewayUrl: string | null
@@ -91,6 +101,43 @@ export type EffectiveGatewayConfig = {
   hostConnected: boolean
   hostEnvOverrideActive: boolean
   hostUnreadableError: string | null
+}
+
+function readEnvGatewayUrl(env: Record<string, string | undefined>): {
+  url: string
+  varName: string | null
+} {
+  for (const key of ENV_GATEWAY_URL_KEYS) {
+    const normalized = normalizeGatewayUrl(env[key])
+    if (normalized) {
+      return { url: normalized, varName: key }
+    }
+  }
+  return { url: '', varName: null }
+}
+
+function readEnvGatewayToken(env: Record<string, string | undefined>): {
+  token: string | null
+  varName: string | null
+} {
+  for (const key of ENV_GATEWAY_TOKEN_KEYS) {
+    const trimmed = env[key]?.trim()
+    if (trimmed) {
+      return { token: trimmed, varName: key }
+    }
+  }
+  return { token: null, varName: null }
+}
+
+function readEnvGatewayAuthMode(env: Record<string, string | undefined>): GatewayAuthMode | null {
+  const raw = env[ENV_GATEWAY_AUTH_MODE_KEY]?.trim().toLowerCase()
+  if (raw === 'none') {
+    return 'none'
+  }
+  if (raw === 'static') {
+    return 'static'
+  }
+  return null
 }
 
 export function normalizeGatewayUrl(raw: unknown): string {
@@ -142,7 +189,13 @@ export function resolveEffectiveGatewayConfig(input: {
   pluginGatewayUrl: unknown
   pluginToken: string | null | undefined
   hostSnapshotRaw: string | null | undefined
+  env?: Record<string, string | undefined>
 }): EffectiveGatewayConfig {
+  const env = input.env ?? process.env
+  const envUrl = readEnvGatewayUrl(env)
+  const envTok = readEnvGatewayToken(env)
+  const envAuthMode = readEnvGatewayAuthMode(env)
+
   const pluginGatewayUrl = normalizeGatewayUrl(input.pluginGatewayUrl)
   const pluginToken = input.pluginToken?.trim() || null
   const host = parseHostShareGatewaySnapshot(input.hostSnapshotRaw)
@@ -154,31 +207,53 @@ export function resolveEffectiveGatewayConfig(input: {
   let authMode: GatewayAuthMode = 'static'
   let source: GatewayConfigSource = 'none'
 
-  if (pluginGatewayUrl) {
-    gatewayUrl = pluginGatewayUrl
-    if (pluginToken) {
+  if (envUrl.url) {
+    gatewayUrl = envUrl.url
+    source = 'env'
+    if (envTok.token) {
+      authMode = envAuthMode ?? 'static'
+      token = authMode === 'none' ? null : envTok.token
+    } else if (envAuthMode === 'none') {
+      authMode = 'none'
+    } else if (
+      pluginToken &&
+      (pluginGatewayUrl === envUrl.url || (!pluginGatewayUrl && hostGatewayUrl === envUrl.url))
+    ) {
       token = pluginToken
-      source = 'plugin'
-    } else if (host && hostGatewayUrl === pluginGatewayUrl) {
-      token = host.token
-      authMode = host.authMode
-      source = 'host'
+      authMode = envAuthMode ?? 'static'
+    } else if (host && hostGatewayUrl === envUrl.url) {
+      authMode = envAuthMode ?? host.authMode
+      token = authMode === 'none' ? null : host.token
     } else {
-      token = null
-      source = 'plugin'
-    }
-  } else if (host && hostGatewayUrl) {
-    gatewayUrl = hostGatewayUrl
-    if (pluginToken) {
-      token = pluginToken
-      source = 'plugin'
-    } else {
-      token = host.token
-      authMode = host.authMode
-      source = 'host'
+      authMode = envAuthMode ?? 'static'
     }
   } else {
-    token = pluginToken
+    const baseUrl = pluginGatewayUrl || hostGatewayUrl || ''
+    if (baseUrl) {
+      gatewayUrl = baseUrl
+      if (envTok.token) {
+        authMode = envAuthMode ?? 'static'
+        token = authMode === 'none' ? null : envTok.token
+        source = 'env'
+      } else if (envAuthMode === 'none') {
+        authMode = 'none'
+        source = 'env'
+      } else if (pluginToken) {
+        token = pluginToken
+        authMode = envAuthMode ?? 'static'
+        source = 'plugin'
+      } else if (host && hostGatewayUrl === baseUrl) {
+        authMode = envAuthMode ?? host.authMode
+        token = authMode === 'none' ? null : host.token
+        source = 'host'
+      } else {
+        authMode = envAuthMode ?? 'static'
+        source = 'plugin'
+      }
+    } else {
+      authMode = envAuthMode ?? 'static'
+      token = authMode === 'none' ? null : (envTok.token ?? pluginToken)
+    }
   }
 
   const tokenStored = Boolean(token)
@@ -192,6 +267,10 @@ export function resolveEffectiveGatewayConfig(input: {
     configured,
     tokenStored,
     hasPluginOverride,
+    envGatewayUrl: envUrl.url,
+    envTokenStored: Boolean(envTok.token),
+    envUrlVar: envUrl.varName,
+    envTokenVar: envTok.varName,
     pluginGatewayUrl,
     pluginTokenStored: Boolean(pluginToken),
     hostGatewayUrl,
