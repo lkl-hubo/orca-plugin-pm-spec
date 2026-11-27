@@ -38,9 +38,11 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 export class GatewayClient {
   private readonly orca: OrcaWorkerApi
+  private readonly env?: Record<string, string | undefined>
 
-  constructor(orca: OrcaWorkerApi) {
+  constructor(orca: OrcaWorkerApi, env?: Record<string, string | undefined>) {
     this.orca = orca
+    this.env = env
   }
 
   async readConfig(): Promise<EffectiveGatewayConfig> {
@@ -52,7 +54,8 @@ export class GatewayClient {
     return resolveEffectiveGatewayConfig({
       pluginGatewayUrl: rawUrl,
       pluginToken,
-      hostSnapshotRaw
+      hostSnapshotRaw,
+      env: this.env
     })
   }
 
@@ -69,6 +72,10 @@ export class GatewayClient {
       authMode: cfg.authMode,
       effectiveGatewayUrl: cfg.gatewayUrl,
       hasPluginOverride: cfg.hasPluginOverride,
+      envGatewayUrl: cfg.envGatewayUrl,
+      envTokenStored: cfg.envTokenStored,
+      envUrlVar: cfg.envUrlVar,
+      envTokenVar: cfg.envTokenVar,
       hostGatewayUrl: cfg.hostGatewayUrl,
       hostConnected: cfg.hostConnected,
       hostEnvOverrideActive: cfg.hostEnvOverrideActive,
@@ -94,7 +101,7 @@ export class GatewayClient {
   }
 
   async testConnection() {
-    const { gatewayUrl, token } = await this.readConfig()
+    const { gatewayUrl, token, authMode } = await this.readConfig()
     if (!gatewayUrl) {
       return { ok: false, backend: null, latencyMs: 0, errorCode: 'E_GATEWAY_NOT_CONFIGURED' }
     }
@@ -113,7 +120,9 @@ export class GatewayClient {
       // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: /healthz returns a JSON object with optional backend and authMode fields.
       const hJson = (await hRes.json()) as { backend?: string; authMode?: string }
       const backend = typeof hJson.backend === 'string' ? hJson.backend : null
-      if (hJson.authMode !== 'none') {
+      const requiresAuth =
+        hJson.authMode === 'static' || (hJson.authMode !== 'none' && authMode !== 'none')
+      if (requiresAuth) {
         if (!token) {
           return fail('E_GATEWAY_NOT_CONFIGURED', backend)
         }
@@ -165,7 +174,7 @@ export class GatewayClient {
     const init: RequestInit = {
       method: options.method,
       headers: {
-        ...(cfg.token ? { Authorization: `Bearer ${cfg.token}` } : {}),
+        ...(cfg.authMode !== 'none' && cfg.token ? { Authorization: `Bearer ${cfg.token}` } : {}),
         ...(options.editToken ? { 'X-PMS-Edit-Token': options.editToken } : {}),
         ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers

@@ -167,10 +167,14 @@ declare module 'orca' {
         configured: boolean
         tokenStored: boolean
         protection: 'os-keyring' | 'unavailable'
-        source: 'host' | 'plugin' | 'none'
+        source: 'env' | 'host' | 'plugin' | 'none'
         authMode: 'static' | 'none'
         effectiveGatewayUrl: string
         hasPluginOverride: boolean
+        envGatewayUrl: string
+        envTokenStored: boolean
+        envUrlVar: string | null
+        envTokenVar: string | null
         hostGatewayUrl: string | null
         hostConnected: boolean
         hostEnvOverrideActive: boolean

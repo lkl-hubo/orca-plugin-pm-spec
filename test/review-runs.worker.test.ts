@@ -10,6 +10,24 @@ import * as main from '../worker/main.ts'
 const tempDirs: string[] = []
 const originalFetch = globalThis.fetch
 const realSetTimeout = globalThis.setTimeout
+const GATEWAY_ENV_KEYS = [
+  'ORCA_ARTIFACTS_API_URL',
+  'PMSPEC_GATEWAY_URL',
+  'ORCA_CLOUD_AUTH_TOKEN',
+  'PMSPEC_BEARER_TOKEN',
+  'ORCA_SHARE_GATEWAY_AUTH_MODE'
+] as const
+const originalEnv = Object.fromEntries(GATEWAY_ENV_KEYS.map((k) => [k, process.env[k]]))
+
+function setGatewayEnv(vars: Partial<Record<(typeof GATEWAY_ENV_KEYS)[number], string | undefined>>) {
+  for (const key of GATEWAY_ENV_KEYS) {
+    if (key in vars && vars[key] !== undefined) {
+      process.env[key] = vars[key]
+    } else {
+      delete process.env[key]
+    }
+  }
+}
 
 function makeSpecContent(specId: string, extraLine = ''): string {
   return `---
@@ -143,6 +161,7 @@ async function waitForRunUpdatedPost(
 
 afterEach(async () => {
   globalThis.fetch = originalFetch
+  setGatewayEnv(originalEnv)
   mock.timers.reset()
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop()!, { recursive: true, force: true })
@@ -840,6 +859,299 @@ describe('E43-E46: Gateway retries, auth handling, keyring guard, and local L023
       assert.equal(restoredStatus.effectiveGatewayUrl, 'https://host-gw.example.com')
     } finally {
       await worker.deactivate()
+    }
+  })
+
+  test('env vars ORCA_ARTIFACTS_API_URL & ORCA_CLOUD_AUTH_TOKEN enable direct connection with zero plugin/host config', async () => {
+    setGatewayEnv({
+      ORCA_ARTIFACTS_API_URL: 'https://env-gw.example.com/',
+      ORCA_CLOUD_AUTH_TOKEN: 'env-demo-token'
+    })
+    const wsDir = await setupWorkspace(['PAY-E50-001'])
+    const host = mockHost({
+      settings: { gatewayUrl: '', collectLocalMetrics: false },
+      secrets: {},
+      results: {
+        'workspace.readContext': {
+          workspaceId: 'ws-1',
+          branch: 'main',
+          displayName: 'ws-1',
+          terminals: []
+        },
+        'workspace.list': {
+          workspaces: [
+            { id: 'ws-1', kind: 'folder', name: 'ws-1', path: wsDir, branch: null, hostId: null }
+          ],
+          truncated: false
+        }
+      }
+    })
+    const requests: { url: string; method: string; auth: string | null }[] = []
+    globalThis.fetch = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = String(input)
+        const method = (init?.method ?? 'GET').toUpperCase()
+        const auth = new Headers(init?.headers).get('Authorization')
+        requests.push({ url, method, auth })
+        if (url.endsWith('/healthz')) {
+          return new Response(JSON.stringify({ backend: 'local', authMode: 'static' }), {
+            status: 200
+          })
+        }
+        if (url.endsWith('/v1/spec-reviews?limit=1')) {
+          return new Response(JSON.stringify({ items: [] }), { status: 200 })
+        }
+        if (method === 'POST' && url.endsWith('/v1/spec-reviews')) {
+          return new Response(
+            JSON.stringify({
+              version: 1,
+              slug: 'rev-env-1',
+              status: 'open',
+              specId: 'PAY-E50-001',
+              specVersion: 1,
+              reviewUrl: 'https://env-gw.example.com/r/rev-env-1?k=k1',
+              reviewerKey: 'k1',
+              editToken: 'et1',
+              createdAt: '2026-11-27T00:00:00.000Z',
+              expiresAt: '2026-12-11T00:00:00.000Z'
+            }),
+            { status: 201 }
+          )
+        }
+        return new Response('unexpected', { status: 500 })
+      },
+      { preconnect: originalFetch.preconnect }
+    )
+
+    const worker = await mountWorker(main, { host })
+    try {
+      const status = await worker.request('gateway.status', {})
+      assert.equal(status.configured, true)
+      assert.equal(status.source, 'env')
+      assert.equal(status.tokenStored, true)
+      assert.equal(status.effectiveGatewayUrl, 'https://env-gw.example.com')
+      assert.equal(status.envUrlVar, 'ORCA_ARTIFACTS_API_URL')
+      assert.equal(status.envTokenVar, 'ORCA_CLOUD_AUTH_TOKEN')
+
+      const testRes = await worker.request('gateway.test', {})
+      assert.equal(testRes.ok, true)
+      assert.equal(testRes.backend, 'local')
+
+      await worker.request('spec.snapshot', { specId: 'PAY-E50-001' })
+      const published = await worker.request('review.publish', {
+        specId: 'PAY-E50-001',
+        version: 1
+      })
+      assert.equal(published.slug, 'rev-env-1')
+
+      assert.deepEqual(
+        requests.map((r) => [r.method, r.url, r.auth]),
+        [
+          ['GET', 'https://env-gw.example.com/healthz', null],
+          ['GET', 'https://env-gw.example.com/v1/spec-reviews?limit=1', 'Bearer env-demo-token'],
+          ['POST', 'https://env-gw.example.com/v1/spec-reviews', 'Bearer env-demo-token']
+        ]
+      )
+    } finally {
+      await worker.deactivate()
+    }
+  })
+
+  test('env vars override both plugin settings and host snapshot', async () => {
+    setGatewayEnv({
+      ORCA_ARTIFACTS_API_URL: 'https://env-priority.example.com',
+      ORCA_CLOUD_AUTH_TOKEN: 'env-priority-tok'
+    })
+    const host = mockHost({
+      settings: { gatewayUrl: 'https://plugin-gw.example.com' },
+      secrets: {
+        'gateway:token': 'plugin-tok',
+        [HOST_SHARE_GATEWAY_SECRET_KEY]: JSON.stringify({
+          gatewayUrl: 'https://host-gw.example.com',
+          authMode: 'static',
+          token: 'host-tok',
+          connected: true,
+          envOverrideActive: false,
+          unreadableError: null
+        })
+      }
+    })
+    let seenUrl = ''
+    let seenAuth: string | null = null
+    globalThis.fetch = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        seenUrl = String(input)
+        seenAuth = new Headers(init?.headers).get('Authorization')
+        if (seenUrl.endsWith('/healthz')) {
+          return new Response(JSON.stringify({ backend: 'local', authMode: 'static' }), {
+            status: 200
+          })
+        }
+        return new Response(JSON.stringify({ items: [] }), { status: 200 })
+      },
+      { preconnect: originalFetch.preconnect }
+    )
+
+    const worker = await mountWorker(main, { host })
+    try {
+      const status = await worker.request('gateway.status', {})
+      assert.equal(status.source, 'env')
+      assert.equal(status.effectiveGatewayUrl, 'https://env-priority.example.com')
+      assert.equal(status.hasPluginOverride, true)
+      assert.equal(status.hostGatewayUrl, 'https://host-gw.example.com')
+
+      const res = await worker.request('gateway.test', {})
+      assert.equal(res.ok, true)
+      assert.equal(seenUrl, 'https://env-priority.example.com/v1/spec-reviews?limit=1')
+      assert.equal(seenAuth, 'Bearer env-priority-tok')
+    } finally {
+      await worker.deactivate()
+    }
+  })
+
+  test('only ORCA_ARTIFACTS_API_URL isolates other gateway tokens and reuses matching host token', async () => {
+    setGatewayEnv({ ORCA_ARTIFACTS_API_URL: 'https://new-env-only.example.com' })
+    const wsDir = await setupWorkspace(['PAY-E51-001'])
+    const hostMismatch = mockHost({
+      settings: { gatewayUrl: 'https://plugin-gw.example.com', collectLocalMetrics: false },
+      secrets: {
+        'gateway:token': 'plugin-tok',
+        [HOST_SHARE_GATEWAY_SECRET_KEY]: JSON.stringify({
+          gatewayUrl: 'https://host-gw.example.com',
+          authMode: 'static',
+          token: 'host-tok',
+          connected: true,
+          envOverrideActive: false,
+          unreadableError: null
+        })
+      },
+      results: {
+        'workspace.readContext': {
+          workspaceId: 'ws-1',
+          branch: 'main',
+          displayName: 'ws-1',
+          terminals: []
+        },
+        'workspace.list': {
+          workspaces: [
+            { id: 'ws-1', kind: 'folder', name: 'ws-1', path: wsDir, branch: null, hostId: null }
+          ],
+          truncated: false
+        }
+      }
+    })
+    const seenAuthHeaders: (string | null)[] = []
+    globalThis.fetch = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        seenAuthHeaders.push(new Headers(init?.headers).get('Authorization'))
+        if (String(input).endsWith('/healthz')) {
+          return new Response(JSON.stringify({ backend: 'local', authMode: 'static' }), {
+            status: 200
+          })
+        }
+        return new Response(JSON.stringify({ items: [] }), { status: 200 })
+      },
+      { preconnect: originalFetch.preconnect }
+    )
+
+    const workerMismatch = await mountWorker(main, { host: hostMismatch })
+    try {
+      const status = await workerMismatch.request('gateway.status', {})
+      assert.equal(status.source, 'env')
+      assert.equal(status.tokenStored, false)
+      assert.equal(status.configured, false)
+
+      const testRes = await workerMismatch.request('gateway.test', {})
+      assert.equal(testRes.ok, false)
+      assert.equal(testRes.errorCode, 'E_GATEWAY_NOT_CONFIGURED')
+      assert.deepEqual(seenAuthHeaders, [null])
+
+      await assert.rejects(
+        () => workerMismatch.request('review.sync', { slug: 'any-slug' }),
+        /E_GATEWAY_NOT_CONFIGURED/
+      )
+    } finally {
+      await workerMismatch.deactivate()
+    }
+
+    setGatewayEnv({ ORCA_ARTIFACTS_API_URL: 'https://host-gw.example.com' })
+    const hostMatch = mockHost({
+      settings: { gatewayUrl: '' },
+      secrets: {
+        [HOST_SHARE_GATEWAY_SECRET_KEY]: JSON.stringify({
+          gatewayUrl: 'https://host-gw.example.com',
+          authMode: 'static',
+          token: 'host-tok',
+          connected: true,
+          envOverrideActive: false,
+          unreadableError: null
+        })
+      }
+    })
+    const workerMatch = await mountWorker(main, { host: hostMatch })
+    try {
+      const status = await workerMatch.request('gateway.status', {})
+      assert.equal(status.source, 'env')
+      assert.equal(status.tokenStored, true)
+      assert.equal(status.configured, true)
+
+      const testRes = await workerMatch.request('gateway.test', {})
+      assert.equal(testRes.ok, true)
+      assert.equal(seenAuthHeaders.at(-1), 'Bearer host-tok')
+    } finally {
+      await workerMatch.deactivate()
+    }
+  })
+
+  test('ORCA_SHARE_GATEWAY_AUTH_MODE=none and empty env vars behave as expected', async () => {
+    setGatewayEnv({
+      ORCA_ARTIFACTS_API_URL: 'http://127.0.0.1:8787',
+      ORCA_SHARE_GATEWAY_AUTH_MODE: 'none'
+    })
+    const hostNone = mockHost({ settings: { gatewayUrl: '' }, secrets: {} })
+    globalThis.fetch = Object.assign(
+      async (input: string | URL | Request): Promise<Response> => {
+        if (String(input).endsWith('/healthz')) {
+          return new Response(JSON.stringify({ backend: 'local', authMode: 'none' }), {
+            status: 200
+          })
+        }
+        return new Response('unexpected', { status: 500 })
+      },
+      { preconnect: originalFetch.preconnect }
+    )
+    const workerNone = await mountWorker(main, { host: hostNone })
+    try {
+      const status = await workerNone.request('gateway.status', {})
+      assert.equal(status.configured, true)
+      assert.equal(status.source, 'env')
+      assert.equal(status.authMode, 'none')
+      assert.equal(status.tokenStored, false)
+
+      const testRes = await workerNone.request('gateway.test', {})
+      assert.equal(testRes.ok, true)
+    } finally {
+      await workerNone.deactivate()
+    }
+
+    setGatewayEnv({
+      ORCA_ARTIFACTS_API_URL: '   ',
+      ORCA_CLOUD_AUTH_TOKEN: '',
+      ORCA_SHARE_GATEWAY_AUTH_MODE: ''
+    })
+    const hostFallback = mockHost({
+      settings: { gatewayUrl: 'https://plugin-fallback.example.com' },
+      secrets: { 'gateway:token': 'plugin-fallback-tok' }
+    })
+    const workerFallback = await mountWorker(main, { host: hostFallback })
+    try {
+      const status = await workerFallback.request('gateway.status', {})
+      assert.equal(status.configured, true)
+      assert.equal(status.source, 'plugin')
+      assert.equal(status.effectiveGatewayUrl, 'https://plugin-fallback.example.com')
+      assert.equal(status.tokenStored, true)
+    } finally {
+      await workerFallback.deactivate()
     }
   })
 })

@@ -22,10 +22,14 @@ export type GatewayStatusInfo = {
   configured: boolean
   tokenStored: boolean
   protection: 'os-keyring' | 'unavailable'
-  source: 'host' | 'plugin' | 'none'
+  source: 'env' | 'host' | 'plugin' | 'none'
   authMode: 'static' | 'none'
   effectiveGatewayUrl: string
   hasPluginOverride: boolean
+  envGatewayUrl: string
+  envTokenStored: boolean
+  envUrlVar: string | null
+  envTokenVar: string | null
   hostGatewayUrl: string | null
   hostConnected: boolean
   hostEnvOverrideActive: boolean
@@ -61,6 +65,15 @@ function sourceLabel(status: GatewayStatusInfo | null): string {
   if (!status) {
     return '检测中…'
   }
+  if (status.source === 'env') {
+    if (status.envUrlVar) {
+      return `环境变量（${status.envUrlVar}）`
+    }
+    if (status.envTokenVar) {
+      return `环境变量令牌（${status.envTokenVar}）`
+    }
+    return '环境变量（ORCA_SHARE_GATEWAY_AUTH_MODE）'
+  }
   if (status.source === 'host') {
     return status.hostEnvOverrideActive ? '共享宿主网关（环境变量）' : '共享宿主分享网关'
   }
@@ -77,7 +90,16 @@ function tokenLabel(status: GatewayStatusInfo | null): string {
   if (!status.tokenStored) {
     return '未保存'
   }
-  return status.source === 'host' ? '已复用宿主令牌' : '已保存（独立覆盖）'
+  if (status.envTokenStored) {
+    return `已由环境变量接管（${status.envTokenVar ?? 'ORCA_CLOUD_AUTH_TOKEN'}）`
+  }
+  if (status.source === 'host') {
+    return '已复用宿主令牌'
+  }
+  if (status.source === 'env') {
+    return '已复用同源配置令牌'
+  }
+  return '已保存（独立覆盖）'
 }
 
 async function clearOverride(props: GatewaySetupViewProps): Promise<void> {
@@ -168,6 +190,8 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
   const status = props.gatewayStatus
   const protectionUnavailable = status?.protection === 'unavailable'
   const effectiveUrl = status?.effectiveGatewayUrl || props.gatewayUrl.trim()
+  const envUrlManaged = Boolean(status?.envUrlVar)
+  const envTokenManaged = Boolean(status?.envTokenVar)
 
   return (
     <Stack gap="md">
@@ -201,6 +225,20 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
         </Callout>
       ) : null}
 
+      {status?.source === 'env' ? (
+        <Callout
+          tone={status.configured ? 'accent' : 'warning'}
+          title={status.configured ? '当前由环境变量接管分享网关配置' : '环境变量接管中（配置未完整）'}
+          icon="info"
+        >
+          <Text size="sm">
+            {status.configured
+              ? `当前生效配置由环境变量接管（${[status.envUrlVar, status.envTokenVar].filter(Boolean).join(' / ') || 'ORCA_SHARE_GATEWAY_AUTH_MODE'}），无需重复手工填写；优先级为「环境变量 > 需求中心独立覆盖 > 宿主共享快照」。`
+              : `已检测到环境变量（${status.envUrlVar ?? status.envTokenVar ?? 'ORCA_ARTIFACTS_API_URL'}），但当前仍缺少有效${effectiveUrl ? '访问令牌' : '网关地址'}。请补充对应环境变量后重试。`}
+          </Text>
+        </Callout>
+      ) : null}
+
       {status?.source === 'host' && status.configured ? (
         <Callout tone="accent" title="已自动共享宿主分享网关配置" icon="info">
           <Text size="sm">
@@ -211,7 +249,7 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
         </Callout>
       ) : null}
 
-      <Card title="当前状态" description="优先读取需求中心独立配置，未填写时自动继承宿主分享网关">
+      <Card title="当前状态" description="优先级：环境变量 > 需求中心独立覆盖 > 宿主共享快照">
         <KeyValue
           label="网关配置摘要"
           items={[
@@ -219,7 +257,7 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
               label: '配置来源',
               value: sourceLabel(status),
               tone:
-                status?.source === 'host'
+                status?.source === 'env' || status?.source === 'host'
                   ? 'success'
                   : status?.source === 'plugin'
                     ? 'neutral'
@@ -251,7 +289,11 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
 
       <Card
         title="独立覆盖配置（可选）"
-        description="留空即自动继承宿主「自托管分享网关」；填写则仅覆盖需求中心"
+        description={
+          envUrlManaged
+            ? `当前网关地址已由环境变量 ${status?.envUrlVar} 接管，下方输入暂不生效`
+            : '留空即自动继承宿主「自托管分享网关」；填写则仅覆盖需求中心'
+        }
       >
         <Stack gap="sm">
           <Field
@@ -263,7 +305,7 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
               labelHidden
               placeholder={status?.hostGatewayUrl || 'https://share.example.com'}
               value={urlDraft}
-              disabled={savingUrl || clearingOverride}
+              disabled={savingUrl || clearingOverride || envUrlManaged}
               onChange={(value) => set(urlDraftAtom, value)}
               onSubmit={(value) => void saveGatewayUrl(props, value)}
             />
@@ -284,7 +326,7 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
             <Button
               size="sm"
               variant="outline"
-              disabled={savingUrl || clearingOverride}
+              disabled={savingUrl || clearingOverride || envUrlManaged}
               onPress={() => void saveGatewayUrl(props, urlDraft)}
             >
               {savingUrl ? '保存中…' : '保存地址'}
@@ -293,7 +335,14 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
         </Stack>
       </Card>
 
-      <Card title="访问令牌" description="Bearer 令牌仅存储在系统密钥库中，不会写入工作区文件">
+      <Card
+        title="访问令牌"
+        description={
+          envTokenManaged
+            ? `当前访问令牌已由环境变量 ${status?.envTokenVar} 接管，手工保存暂不生效`
+            : 'Bearer 令牌仅存储在系统密钥库中，不会写入工作区文件'
+        }
+      >
         <Stack gap="sm">
           <Field label="Bearer 访问令牌" required>
             <Input
@@ -302,7 +351,7 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
               type="password"
               placeholder="输入或粘贴分享网关分配的 Bearer Token"
               value={tokenDraft}
-              disabled={savingToken || protectionUnavailable}
+              disabled={savingToken || protectionUnavailable || envTokenManaged}
               onChange={(value) => set(tokenDraftAtom, value)}
               onSubmit={() => void saveToken(props)}
             />
@@ -314,7 +363,12 @@ export function GatewaySetupView(props: GatewaySetupViewProps) {
               variant="solid"
               tone="accent"
               icon="check"
-              disabled={savingToken || tokenDraft.trim().length === 0 || protectionUnavailable}
+              disabled={
+                savingToken ||
+                tokenDraft.trim().length === 0 ||
+                protectionUnavailable ||
+                envTokenManaged
+              }
               onPress={() => void saveToken(props)}
             >
               {savingToken ? '保存中…' : '保存令牌'}

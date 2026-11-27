@@ -66,6 +66,10 @@ const gwStatus = (configured: boolean) => ({
   authMode: 'static' as const,
   effectiveGatewayUrl: configured ? 'https://share.example.com' : '',
   hasPluginOverride: false,
+  envGatewayUrl: '',
+  envTokenStored: false,
+  envUrlVar: null,
+  envTokenVar: null,
   hostGatewayUrl: configured ? 'https://share.example.com' : null,
   hostConnected: configured,
   hostEnvOverrideActive: false,
@@ -286,5 +290,29 @@ export default defineCheck({
     persisted: { plugin: { 'pmspec.route': 'gateway' } },
     settings: { gatewayUrl: '' },
     requests: { 'spec.list': OK_LIST, 'gateway.status': GATEWAY_UNCONFIGURED }
+  },
+  'gateway-env': {
+    persisted: { plugin: { 'pmspec.route': 'gateway' } },
+    settings: { gatewayUrl: '' },
+    requests: {
+      'spec.list': OK_LIST,
+      'gateway.status': {
+        configured: true,
+        tokenStored: true,
+        protection: 'os-keyring' as const,
+        source: 'env' as const,
+        authMode: 'static' as const,
+        effectiveGatewayUrl: 'https://env-gw.example.com',
+        hasPluginOverride: false,
+        envGatewayUrl: 'https://env-gw.example.com',
+        envTokenStored: true,
+        envUrlVar: 'ORCA_ARTIFACTS_API_URL',
+        envTokenVar: 'ORCA_CLOUD_AUTH_TOKEN',
+        hostGatewayUrl: null,
+        hostConnected: false,
+        hostEnvOverrideActive: false,
+        hostUnreadableError: null
+      }
+    }
   }
 })
