@@ -10,18 +10,23 @@
   "homepage": "https://github.com/lkl-hubo/orca-plugin-pm-spec",
   "repository": "https://github.com/lkl-hubo/orca-plugin-pm-spec",
   "engines": {
-    "orca": ">=1.4.248"
+    "orca": ">=1.4.274"
   },
   "pluginApi": 1,
   "main": "worker/main.ts",
   "contributes": {
-    "panels": [
+    "pages": [
       {
         "id": "hub",
         "title": "需求中心",
         "icon": "file-text",
         "entry": "src/panel.tsx",
-        "ui": "components"
+        "ui": "components",
+        "sidebar": {
+          "placement": "primary",
+          "order": 100
+        },
+        "layout": "split-with-workspaces"
       }
     ],
     "commands": [

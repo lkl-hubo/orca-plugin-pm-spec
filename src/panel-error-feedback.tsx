@@ -38,7 +38,61 @@ const DEFAULT_ERROR_MESSAGES: Record<string, string> = {
   E_GATEWAY_AUTH: '网关令牌无效或无权限',
   E_GATEWAY_UNREACHABLE: '无法连接分享网关',
   E_GATEWAY_CONFLICT: '该版本已发布过评审',
-  E_SECRETS_UNAVAILABLE: '本机没有可用的系统密钥库，无法安全保存令牌'
+  E_SECRETS_UNAVAILABLE: '本机没有可用的系统密钥库，无法安全保存令牌',
+  E_RATE_LIMITED: '请求过于频繁，请稍候片刻再试',
+  E_TIMEOUT: '请求超时，请检查分享网关或网络状态后重试',
+  E_UNAVAILABLE: '后台服务暂不可用，请稍后重试',
+  E_CAPABILITY_DENIED: '缺少所需宿主权限，请在插件设置中确认授权',
+  E_CONSENT_REQUIRED: '需要用户授权确认后才能继续',
+  E_NOT_PERMITTED: '当前页面无权执行该操作',
+  E_UNKNOWN_METHOD: '后台尚未注册该操作接口，请尝试重载插件',
+  E_INVALID_PARAMS: '请求参数格式无效',
+  E_INVALID_REQUEST: '请求格式无效',
+  E_TOO_LARGE: '请求或返回内容超出传输限制',
+  E_CONFLICT: '数据发生冲突，请刷新后重试',
+  E_CANCELLED: '操作已取消',
+  E_ACTION_FAILED: '操作执行失败'
+}
+
+const HOST_ERROR_CODE_MAP: Record<string, string> = {
+  rate_limited: 'E_RATE_LIMITED',
+  timeout: 'E_TIMEOUT',
+  unavailable: 'E_UNAVAILABLE',
+  capability_denied: 'E_CAPABILITY_DENIED',
+  consent_required: 'E_CONSENT_REQUIRED',
+  not_permitted: 'E_NOT_PERMITTED',
+  unknown_method: 'E_UNKNOWN_METHOD',
+  invalid_params: 'E_INVALID_PARAMS',
+  invalid_request: 'E_INVALID_REQUEST',
+  too_large: 'E_TOO_LARGE',
+  conflict: 'E_CONFLICT',
+  cancelled: 'E_CANCELLED',
+  action_failed: 'E_ACTION_FAILED'
+}
+
+const GENERIC_HOST_MESSAGES = new Set([
+  'host call failed',
+  'too many panel requests',
+  'too many calls in flight',
+  'timeout',
+  'rate_limited',
+  'unavailable',
+  'action_failed'
+])
+
+function extractRawErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message
+  }
+  return String(error)
 }
 
 const NAV_ACTIONS: Record<string, [string, DetailTabKey?]> = {
@@ -65,14 +119,22 @@ const HELP_CODES: Record<string, [string, Exclude<HelpKind, 'none'>]> = {
 }
 
 export function parseErrorInfo(error: unknown, fallbackSpecId: string | null): PanelErrorInfo {
-  const rawMessage = error instanceof Error ? error.message : String(error)
+  const rawMessage = extractRawErrorMessage(error).trim()
   const rawCode =
     typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
       ? error.code
       : ''
-  const matched = ERROR_CODE_REGEX.exec(rawMessage.trim())
-  const code = matched?.[1] ?? (rawCode.startsWith('E_') ? rawCode : 'E_UNKNOWN')
-  const detail = matched?.[2]?.trim() || rawMessage.trim()
+  const matched = ERROR_CODE_REGEX.exec(rawMessage)
+  const mappedHostCode = rawCode ? HOST_ERROR_CODE_MAP[rawCode] : undefined
+  const code =
+    matched?.[1] ?? (rawCode.startsWith('E_') ? rawCode : (mappedHostCode ?? 'E_UNKNOWN'))
+  const detailFromPrefix = matched?.[2]?.trim()
+  const detail =
+    detailFromPrefix ||
+    (mappedHostCode &&
+    (!rawMessage || GENERIC_HOST_MESSAGES.has(rawMessage.toLowerCase()))
+      ? ''
+      : rawMessage)
   const specId = SPEC_ID_IN_MSG_REGEX.exec(detail)?.[1] ?? fallbackSpecId
   return { code, message: detail || DEFAULT_ERROR_MESSAGES[code] || '操作失败', specId }
 }
