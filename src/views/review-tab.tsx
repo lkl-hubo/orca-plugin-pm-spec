@@ -127,7 +127,7 @@ function ReviewLinkCard({
       icon: 'refresh',
       lockClosed: false,
       run: async () => {
-        await plugin.request('review.sync', { slug: review.slug })
+        await plugin.request('review.sync', { slug: review.slug }, { timeoutMs: 60_000 })
         return '已完成评审意见同步'
       }
     },
@@ -219,8 +219,12 @@ export function ReviewTab(props: ReviewTabProps) {
   const busy = read(busySlugAtom)
   const resolvingId = read(resolvingIdAtom)
   const sortedSnapshots = [...props.snapshots].sort((a, b) => b.version - a.version)
-  const selectedPublishVersion =
-    read(publishVersionBySpecAtom)[props.specId] ?? String(sortedSnapshots[0]?.version ?? '')
+  const storedPublishVersion = read(publishVersionBySpecAtom)[props.specId]
+  const selectedPublishVersion = sortedSnapshots.some(
+    (s) => String(s.version) === storedPublishVersion
+  )
+    ? storedPublishVersion!
+    : String(sortedSnapshots[0]?.version ?? '')
   const selectedSlug = read(selectedSlugBySpecAtom)[props.specId]
   const currentReview =
     props.reviews.find((r) => r.slug === selectedSlug) ??
@@ -274,10 +278,14 @@ export function ReviewTab(props: ReviewTabProps) {
                 disabled={publishing || !selectedPublishVersion}
                 onPress={() =>
                   void runBusy(props, publishingAtom, true, false, async () => {
-                    const review = await plugin.request('review.publish', {
-                      specId: props.specId,
-                      version: Number(selectedPublishVersion)
-                    })
+                    const review = await plugin.request(
+                      'review.publish',
+                      {
+                        specId: props.specId,
+                        version: Number(selectedPublishVersion)
+                      },
+                      { timeoutMs: 60_000 }
+                    )
                     update(selectedSlugBySpecAtom, (prev) => ({
                       ...prev,
                       [props.specId]: review.slug

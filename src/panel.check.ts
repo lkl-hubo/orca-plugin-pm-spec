@@ -1,13 +1,14 @@
 import { defineCheck } from 'orca/testing'
+import type { SpecSummary, UnsupportedReason, WorkspaceInfo } from './protocol.ts'
 
-const LOCAL_WS = {
+const LOCAL_WS: WorkspaceInfo = {
   id: 'folder:pm-spec-demo',
   name: 'pay-specs',
   path: '/Users/pm/pay-specs',
   hostId: 'local'
 }
 
-const SAMPLE_SPECS = [
+const SAMPLE_SPECS: SpecSummary[] = [
   {
     specId: 'PAY-REFUND-001',
     title: '商户自助退款',
@@ -78,9 +79,9 @@ const gwStatus = (configured: boolean) => ({
 const GATEWAY_OK = gwStatus(true)
 const GATEWAY_UNCONFIGURED = gwStatus(false)
 const listScenario = (
-  workspace: Record<string, unknown> | null,
-  unsupportedReason: string | null,
-  specs: typeof SAMPLE_SPECS = [],
+  workspace: WorkspaceInfo | null,
+  unsupportedReason: UnsupportedReason | null,
+  specs: SpecSummary[] = [],
   gateway = GATEWAY_OK
 ) => ({
   requests: {

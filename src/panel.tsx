@@ -1,5 +1,6 @@
 import {
   atom,
+  Box,
   Heading,
   plugin,
   read,
@@ -89,36 +90,155 @@ async function loadGatewayInfo(signal?: AbortSignal): Promise<void> {
   }
 }
 
-async function loadSpecList(signal?: AbortSignal): Promise<SpecListData | null> {
-  try {
-    const data = await plugin.request('spec.list', {})
-    if (signal?.aborted) {
-      return null
-    }
-    set(listStateAtom, { loading: false, data })
-    return data
-  } catch (error) {
-    if (!signal?.aborted) {
-      update(listStateAtom, (prev) => ({ loading: false, data: prev.data }))
-      reportError(error)
-    }
-    return null
-  }
+const LINT_SELF_ECHO_WINDOW_MS = 1500
+let inFlightList: Promise<SpecListData | null> | null = null
+let pendingListReload = false
+const inFlightDetails = new Map<string, Promise<void>>()
+const pendingDetailReload = new Set<string>()
+const lastDetailStartedAt = new Map<string, number>()
+const lastDetailSettledAt = new Map<string, number>()
+
+function resetLoadTracking(): void {
+  inFlightList = null
+  pendingListReload = false
+  inFlightDetails.clear()
+  pendingDetailReload.clear()
+  lastDetailStartedAt.clear()
+  lastDetailSettledAt.clear()
 }
 
-async function loadSpecDetail(specId: string, signal?: AbortSignal): Promise<void> {
-  update(detailStateAtom, (prev) => ({ loading: true, data: prev.data }))
-  try {
-    const detail = await plugin.request('spec.detail', { specId })
-    if (!signal?.aborted) {
-      set(detailStateAtom, { loading: false, data: detail })
+function patchSpecLintInList(specId: string, lint: { error: number; warning: number }): boolean {
+  let found = false
+  update(listStateAtom, (prev) => {
+    if (!prev.data) {
+      return prev
     }
-  } catch (error) {
-    if (!signal?.aborted) {
-      update(detailStateAtom, (prev) => ({ loading: false, data: prev.data }))
-      reportError(error, { specId })
+    const specs = prev.data.specs.map((spec) => {
+      if (spec.specId !== specId) {
+        return spec
+      }
+      found = true
+      if (spec.lint && spec.lint.error === lint.error && spec.lint.warning === lint.warning) {
+        return spec
+      }
+      return { ...spec, lint }
+    })
+    return found ? { ...prev, data: { ...prev.data, specs } } : prev
+  })
+  return found
+}
+
+function patchRunInList(run: RunView): void {
+  update(listStateAtom, (prev) => {
+    if (!prev.data) {
+      return prev
     }
+    let changed = false
+    const specs = prev.data.specs.map((spec) => {
+      if (spec.specId !== run.specId) {
+        return spec
+      }
+      changed = true
+      return {
+        ...spec,
+        lastRun: { runId: run.runId, status: run.status, finishedAt: run.finishedAt }
+      }
+    })
+    return changed ? { ...prev, data: { ...prev.data, specs } } : prev
+  })
+}
+
+function patchReviewIssuesInList(slug: string, openIssues: number): void {
+  update(listStateAtom, (prev) => {
+    if (!prev.data) {
+      return prev
+    }
+    let changed = false
+    const specs = prev.data.specs.map((spec) => {
+      if (!spec.openReview || spec.openReview.slug !== slug) {
+        return spec
+      }
+      if (spec.openReview.openIssues === openIssues) {
+        return spec
+      }
+      changed = true
+      return { ...spec, openReview: { ...spec.openReview, openIssues } }
+    })
+    return changed ? { ...prev, data: { ...prev.data, specs } } : prev
+  })
+}
+
+function loadSpecList(
+  signal?: AbortSignal,
+  options?: { force?: boolean }
+): Promise<SpecListData | null> {
+  if (inFlightList) {
+    if (options?.force) {
+      pendingListReload = true
+    }
+    return inFlightList
   }
+  const run = (async () => {
+    try {
+      const data = await plugin.request('spec.list', {})
+      if (signal?.aborted) {
+        return null
+      }
+      set(listStateAtom, { loading: false, data })
+      return data
+    } catch (error) {
+      if (!signal?.aborted) {
+        update(listStateAtom, (prev) => ({ loading: false, data: prev.data }))
+        reportError(error)
+      }
+      return null
+    } finally {
+      inFlightList = null
+      if (pendingListReload && !signal?.aborted) {
+        pendingListReload = false
+        void loadSpecList(signal)
+      }
+    }
+  })()
+  inFlightList = run
+  return run
+}
+
+function loadSpecDetail(
+  specId: string,
+  signal?: AbortSignal,
+  options?: { force?: boolean }
+): Promise<void> {
+  const existing = inFlightDetails.get(specId)
+  if (existing) {
+    if (options?.force) {
+      pendingDetailReload.add(specId)
+    }
+    return existing
+  }
+  lastDetailStartedAt.set(specId, Date.now())
+  update(detailStateAtom, (prev) => ({ loading: true, data: prev.data }))
+  const run = (async () => {
+    try {
+      const detail = await plugin.request('spec.detail', { specId })
+      if (!signal?.aborted) {
+        set(detailStateAtom, { loading: false, data: detail })
+      }
+    } catch (error) {
+      if (!signal?.aborted) {
+        update(detailStateAtom, (prev) => ({ loading: false, data: prev.data }))
+        reportError(error, { specId })
+      }
+    } finally {
+      inFlightDetails.delete(specId)
+      lastDetailSettledAt.set(specId, Date.now())
+      if (pendingDetailReload.delete(specId) && !signal?.aborted) {
+        void loadSpecDetail(specId, signal)
+      }
+    }
+  })()
+  inFlightDetails.set(specId, run)
+  return run
 }
 
 async function openSpecDetail(specId: string, tab?: DetailTabKey): Promise<void> {
@@ -128,8 +248,7 @@ async function openSpecDetail(specId: string, tab?: DetailTabKey): Promise<void>
     set(activeTabAtom, tab)
   }
   set(routeAtom, 'detail')
-  await plugin.request('spec.select', { specId }).catch(() => undefined)
-  await loadSpecDetail(specId)
+  await loadSpecDetail(specId, undefined, { force: true })
 }
 
 function patchRunInDetail(run: RunView): void {
@@ -211,11 +330,16 @@ function FeedbackHeader({ workspacePath }: { workspacePath: string | null }) {
         void runBusyTask(async () => {
           const res = await plugin.request('spec.bumpVersion', { specId })
           clearFeedback()
-          await Promise.all([loadSpecDetail(specId), loadSpecList()])
+          await Promise.all([
+            loadSpecDetail(specId, undefined, { force: true }),
+            loadSpecList(undefined, { force: true })
+          ])
           set(bannerNoticeAtom, `已递增版本号至 v${res.version}，${tip}`)
         })
       }
-      onRefreshList={() => void runBusyTask(() => loadSpecList().then(() => undefined))}
+      onRefreshList={() =>
+        void runBusyTask(() => loadSpecList(undefined, { force: true }).then(() => undefined))
+      }
       onTestGateway={() =>
         void runBusyTask(async () => {
           const res = await plugin.request('gateway.test', {})
@@ -239,6 +363,7 @@ function FeedbackHeader({ workspacePath }: { workspacePath: string | null }) {
 }
 
 export function setup(ctx: PanelContext): void {
+  resetLoadTracking()
   const reloadDetail = (specId?: string) => {
     const active = read(selectedSpecIdAtom)
     if (read(routeAtom) === 'detail' && active && (!specId || active === specId)) {
@@ -246,27 +371,52 @@ export function setup(ctx: PanelContext): void {
     }
   }
   ctx.subscriptions.push(
-    plugin.on('pmspec.lint.updated', ({ specId }) => {
-      void loadSpecList(ctx.signal)
-      reloadDetail(specId)
+    { dispose: resetLoadTracking },
+    plugin.on('pmspec.lint.updated', ({ specId, error, warning }) => {
+      const found = patchSpecLintInList(specId, { error, warning })
+      if (!found && !inFlightList) {
+        void loadSpecList(ctx.signal)
+      }
+      const active = read(selectedSpecIdAtom)
+      if (read(routeAtom) !== 'detail' || active !== specId) {
+        return
+      }
+      // `spec.detail` itself calls `runAndBroadcastLint`, which emits `pmspec.lint.updated`.
+      // Suppress self-echoes within the active/recent fetch window to prevent infinite loops.
+      const now = Date.now()
+      const startedAt = lastDetailStartedAt.get(specId) ?? 0
+      const settledAt = lastDetailSettledAt.get(specId) ?? 0
+      if (
+        inFlightDetails.has(specId) ||
+        now - startedAt < LINT_SELF_ECHO_WINDOW_MS ||
+        now - settledAt < LINT_SELF_ECHO_WINDOW_MS
+      ) {
+        return
+      }
+      void loadSpecDetail(specId, ctx.signal)
     }),
     plugin.on('pmspec.run.updated', (run) => {
       patchRunInDetail(run)
-      void loadSpecList(ctx.signal)
+      patchRunInList(run)
       if (run.status !== 'launching' && run.status !== 'running' && run.status !== 'collecting') {
+        void loadSpecList(ctx.signal, { force: true })
         reloadDetail(run.specId)
       }
     }),
-    plugin.on('pmspec.review.updated', ({ slug }) => {
-      void loadSpecList(ctx.signal)
+    plugin.on('pmspec.review.updated', ({ slug, openIssues }) => {
+      patchReviewIssuesInList(slug, openIssues)
       const detail = read(detailStateAtom).data
-      if (detail?.reviews.some((rev) => rev.slug === slug)) {
+      if (
+        read(routeAtom) === 'detail' &&
+        detail?.reviews.some((rev) => rev.slug === slug) &&
+        !inFlightDetails.has(detail.summary.specId)
+      ) {
         reloadDetail(detail.summary.specId)
       }
     }),
     plugin.on('pmspec.workspace.changed', () => {
       clearFeedback()
-      void loadSpecList(ctx.signal).then((list) => {
+      void loadSpecList(ctx.signal, { force: true }).then((list) => {
         if (ctx.signal.aborted) {
           return
         }
@@ -281,7 +431,7 @@ export function setup(ctx: PanelContext): void {
           set(routeAtom, 'list')
           set(detailStateAtom, { loading: false, data: null })
         } else if (exists && selected && read(routeAtom) === 'detail') {
-          void loadSpecDetail(selected, ctx.signal)
+          void loadSpecDetail(selected, ctx.signal, { force: true })
         }
       })
     }),
@@ -290,7 +440,7 @@ export function setup(ctx: PanelContext): void {
   void loadGatewayInfo(ctx.signal)
   void loadSpecList(ctx.signal)
   const initialSpecId = read(selectedSpecIdAtom)
-  if (initialSpecId) {
+  if (initialSpecId && read(routeAtom) === 'detail') {
     void loadSpecDetail(initialSpecId, ctx.signal)
   }
 }
@@ -313,8 +463,9 @@ export default function Panel() {
     onClearFeedback: clearFeedback
   }
 
+  let content = null
   if (route === 'gateway') {
-    return (
+    content = (
       <Stack gap="md">
         <FeedbackHeader workspacePath={workspacePath} />
         <GatewaySetupView
@@ -329,72 +480,76 @@ export default function Panel() {
         />
       </Stack>
     )
-  }
-  if (listState.loading && !listState.data) {
-    return (
+  } else if (listState.loading && !listState.data) {
+    content = (
       <Stack gap="md">
         <Heading level={2}>需求中心</Heading>
         <Skeleton shape="block" lines={4} label="正在加载规格工作区" />
       </Stack>
     )
+  } else {
+    const listData = listState.data
+    if (!listData || listData.unsupportedReason !== null || !listData.workspace) {
+      content = (
+        <Stack gap="md">
+          <FeedbackHeader workspacePath={workspacePath} />
+          <UnsupportedWorkspaceView
+            workspace={listData?.workspace ?? null}
+            unsupportedReason={listData?.unsupportedReason ?? 'no-workspace'}
+            configErrors={listData?.configErrors ?? []}
+            pendingInit={read(pendingInitAtom)}
+            onInitWorkspace={startWorkspaceInit}
+            onOpenGateway={shared.onOpenGateway}
+            onOpenConfigHelp={() => toggleHelp('config')}
+            onRefreshList={() => void loadSpecList(undefined, { force: true })}
+          />
+        </Stack>
+      )
+    } else {
+      const gatewayConfigured = gatewayStatus?.configured ?? false
+      if (route === 'detail' && selectedSpecId) {
+        content = (
+          <Stack gap="md">
+            <FeedbackHeader workspacePath={workspacePath} />
+            <SpecDetailView
+              specId={selectedSpecId}
+              loading={detailState.loading}
+              detail={detailState.data}
+              activeTab={read(activeTabAtom)}
+              gatewayConfigured={gatewayConfigured}
+              onTabChange={(tab) => set(activeTabAtom, tab)}
+              onBack={() => {
+                clearFeedback()
+                set(routeAtom, 'list')
+              }}
+              onRefreshDetail={() => loadSpecDetail(selectedSpecId, undefined, { force: true })}
+              onRefreshList={() => loadSpecList(undefined, { force: true }).then(() => undefined)}
+              onRunPatched={patchRunInDetail}
+              {...shared}
+            />
+          </Stack>
+        )
+      } else {
+        content = (
+          <Stack gap="md">
+            <FeedbackHeader workspacePath={workspacePath} />
+            <SpecListView
+              workspace={listData.workspace}
+              specs={listData.specs}
+              gatewayConfigured={gatewayConfigured}
+              onSelectSpec={(specId) => openSpecDetail(specId)}
+              onSpecCreated={async (specId) => {
+                await loadSpecList(undefined, { force: true })
+                await openSpecDetail(specId, 'lint')
+              }}
+              onRefresh={() => loadSpecList(undefined, { force: true }).then(() => undefined)}
+              {...shared}
+            />
+          </Stack>
+        )
+      }
+    }
   }
-  const listData = listState.data
-  if (!listData || listData.unsupportedReason !== null || !listData.workspace) {
-    return (
-      <Stack gap="md">
-        <FeedbackHeader workspacePath={workspacePath} />
-        <UnsupportedWorkspaceView
-          workspace={listData?.workspace ?? null}
-          unsupportedReason={listData?.unsupportedReason ?? 'no-workspace'}
-          configErrors={listData?.configErrors ?? []}
-          pendingInit={read(pendingInitAtom)}
-          onInitWorkspace={startWorkspaceInit}
-          onOpenGateway={shared.onOpenGateway}
-          onOpenConfigHelp={() => toggleHelp('config')}
-          onRefreshList={() => void loadSpecList()}
-        />
-      </Stack>
-    )
-  }
-  const gatewayConfigured = gatewayStatus?.configured ?? false
-  if (route === 'detail' && selectedSpecId) {
-    return (
-      <Stack gap="md">
-        <FeedbackHeader workspacePath={workspacePath} />
-        <SpecDetailView
-          specId={selectedSpecId}
-          loading={detailState.loading}
-          detail={detailState.data}
-          activeTab={read(activeTabAtom)}
-          gatewayConfigured={gatewayConfigured}
-          onTabChange={(tab) => set(activeTabAtom, tab)}
-          onBack={() => {
-            clearFeedback()
-            set(routeAtom, 'list')
-          }}
-          onRefreshDetail={() => loadSpecDetail(selectedSpecId)}
-          onRefreshList={() => loadSpecList().then(() => undefined)}
-          onRunPatched={patchRunInDetail}
-          {...shared}
-        />
-      </Stack>
-    )
-  }
-  return (
-    <Stack gap="md">
-      <FeedbackHeader workspacePath={workspacePath} />
-      <SpecListView
-        workspace={listData.workspace}
-        specs={listData.specs}
-        gatewayConfigured={gatewayConfigured}
-        onSelectSpec={(specId) => openSpecDetail(specId)}
-        onSpecCreated={async (specId) => {
-          await loadSpecList()
-          await openSpecDetail(specId, 'lint')
-        }}
-        onRefresh={() => loadSpecList().then(() => undefined)}
-        {...shared}
-      />
-    </Stack>
-  )
+
+  return <Box padding="md">{content}</Box>
 }
